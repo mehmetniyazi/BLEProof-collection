@@ -22,7 +22,6 @@ import android.widget.TextView
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import com.google.android.material.switchmaterial.SwitchMaterial
 import java.text.SimpleDateFormat
 import java.util.*
@@ -30,11 +29,8 @@ import java.util.*
 private const val ENABLE_BLUETOOTH_REQUEST_CODE = 1
 private const val LOCATION_PERMISSION_REQUEST_CODE = 2
 private const val BLUETOOTH_ALL_PERMISSIONS_REQUEST_CODE = 3
-private const val SERVICE_UUID = "25AE1441-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_READ_UUID = "25AE1442-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_WRITE_UUID = "25AE1443-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_INDICATE_UUID = "25AE1444-05D3-4C5B-8281-93D4E07420CF"
-private const val CCC_DESCRIPTOR_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+private const val SERVICE_UUID = "00001523-1212-EFDE-1523-785FEABCD123"
+private const val CHAR_FOR_WRITE_UUID = "00001524-1212-EFDE-1523-785FEABCD123"
 
 class MainActivity : AppCompatActivity() {
     enum class BLELifecycleState {
@@ -78,9 +74,7 @@ class MainActivity : AppCompatActivity() {
     private val userWantsToScanAndConnect: Boolean get() = switchConnect.isChecked
     private var isScanning = false
     private var connectedGatt: BluetoothGatt? = null
-    private var characteristicForRead: BluetoothGattCharacteristic? = null
     private var characteristicForWrite: BluetoothGattCharacteristic? = null
-    private var characteristicForIndicate: BluetoothGattCharacteristic? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,19 +101,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun onTapRead(view: View) {
-        var gatt = connectedGatt ?: run {
-            appendLog("ERROR: read failed, no connected device")
-            return
-        }
-        var characteristic = characteristicForRead ?: run {
-            appendLog("ERROR: read failed, characteristic unavailable $CHAR_FOR_READ_UUID")
-            return
-        }
-        if (!characteristic.isReadable()) {
-            appendLog("ERROR: read failed, characteristic not readable $CHAR_FOR_READ_UUID")
-            return
-        }
-        gatt.readCharacteristic(characteristic)
     }
 
     fun onTapWrite(view: View) {
@@ -167,9 +148,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setConnectedGattToNull() {
         connectedGatt = null
-        characteristicForRead = null
         characteristicForWrite = null
-        characteristicForIndicate = null
     }
 
     private fun bleRestartLifecycle() {
@@ -221,29 +200,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun subscribeToIndications(characteristic: BluetoothGattCharacteristic, gatt: BluetoothGatt) {
-        val cccdUuid = UUID.fromString(CCC_DESCRIPTOR_UUID)
-        characteristic.getDescriptor(cccdUuid)?.let { cccDescriptor ->
-            if (!gatt.setCharacteristicNotification(characteristic, true)) {
-                appendLog("ERROR: setNotification(true) failed for ${characteristic.uuid}")
-                return
-            }
-            cccDescriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            gatt.writeDescriptor(cccDescriptor)
-        }
     }
 
     private fun unsubscribeFromCharacteristic(characteristic: BluetoothGattCharacteristic) {
-        val gatt = connectedGatt ?: return
-
-        val cccdUuid = UUID.fromString(CCC_DESCRIPTOR_UUID)
-        characteristic.getDescriptor(cccdUuid)?.let { cccDescriptor ->
-            if (!gatt.setCharacteristicNotification(characteristic, false)) {
-                appendLog("ERROR: setNotification(false) failed for ${characteristic.uuid}")
-                return
-            }
-            cccDescriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-            gatt.writeDescriptor(cccDescriptor)
-        }
     }
 
     private val bluetoothAdapter: BluetoothAdapter by lazy {
@@ -360,34 +319,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             connectedGatt = gatt
-            characteristicForRead = service.getCharacteristic(UUID.fromString(CHAR_FOR_READ_UUID))
             characteristicForWrite = service.getCharacteristic(UUID.fromString(CHAR_FOR_WRITE_UUID))
-            characteristicForIndicate = service.getCharacteristic(UUID.fromString(CHAR_FOR_INDICATE_UUID))
-
-            characteristicForIndicate?.let {
-                lifecycleState = BLELifecycleState.ConnectedSubscribing
-                subscribeToIndications(it, gatt)
-            } ?: run {
-                appendLog("WARN: characteristic not found $CHAR_FOR_INDICATE_UUID")
-                lifecycleState = BLELifecycleState.Connected
-            }
         }
 
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (characteristic.uuid == UUID.fromString(CHAR_FOR_READ_UUID)) {
-                val strValue = characteristic.value.toString(Charsets.UTF_8)
-                val log = "onCharacteristicRead " + when (status) {
-                    BluetoothGatt.GATT_SUCCESS -> "OK, value=\"$strValue\""
-                    BluetoothGatt.GATT_READ_NOT_PERMITTED -> "not allowed"
-                    else -> "error $status"
-                }
-                appendLog(log)
-                runOnUiThread {
-                    textViewReadValue.text = strValue
-                }
-            } else {
-                appendLog("onCharacteristicRead unknown uuid $characteristic.uuid")
-            }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -405,39 +340,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == UUID.fromString(CHAR_FOR_INDICATE_UUID)) {
-                val strValue = characteristic.value.toString(Charsets.UTF_8)
-                appendLog("onCharacteristicChanged value=\"$strValue\"")
-                runOnUiThread {
-                    textViewIndicateValue.text = strValue
-                }
-            } else {
-                appendLog("onCharacteristicChanged unknown uuid $characteristic.uuid")
-            }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            if (descriptor.characteristic.uuid == UUID.fromString(CHAR_FOR_INDICATE_UUID)) {
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    val value = descriptor.value
-                    val isSubscribed = value.isNotEmpty() && value[0].toInt() != 0
-                    val subscriptionText = when (isSubscribed) {
-                        true -> getString(R.string.text_subscribed)
-                        false -> getString(R.string.text_not_subscribed)
-                    }
-                    appendLog("onDescriptorWrite $subscriptionText")
-                    runOnUiThread {
-                        textViewSubscription.text = subscriptionText
-                    }
-                } else {
-                    appendLog("ERROR: onDescriptorWrite status=$status uuid=${descriptor.uuid} char=${descriptor.characteristic.uuid}")
-                }
-
-                // subscription processed, consider connection is ready for use
-                lifecycleState = BLELifecycleState.Connected
-            } else {
-                appendLog("onDescriptorWrite unknown uuid $descriptor.characteristic.uuid")
-            }
         }
     }
     //endregion

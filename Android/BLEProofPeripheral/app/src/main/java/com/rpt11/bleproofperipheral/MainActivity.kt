@@ -3,34 +3,33 @@ package com.rpt11.bleproofperipheral
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.*
-import android.bluetooth.le.AdvertiseCallback
-import android.bluetooth.le.AdvertiseData
-import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.os.Build
-import androidx.appcompat.app.AppCompatActivity
-import android.os.Bundle
-import android.os.Handler
-import android.os.ParcelUuid
+import android.os.*
 import android.util.Log
 import android.view.View
 import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.switchmaterial.SwitchMaterial
 import java.text.SimpleDateFormat
 import java.util.*
 
 private const val ENABLE_BLUETOOTH_REQUEST_CODE = 1
-private const val BLUETOOTH_ALL_PERMISSIONS_REQUEST_CODE = 2
-private const val SERVICE_UUID = "25AE1441-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_READ_UUID = "25AE1442-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_WRITE_UUID = "25AE1443-05D3-4C5B-8281-93D4E07420CF"
-private const val CHAR_FOR_INDICATE_UUID = "25AE1444-05D3-4C5B-8281-93D4E07420CF"
-private const val CCC_DESCRIPTOR_UUID = "00002902-0000-1000-8000-00805f9b34fb"
+private const val BLUETOOTH_ALL_PERMISSIONS_REQUEST_CODE = 3
+private const val LOCATION_PERMISSION_REQUEST_CODE = 2
+private const val SERVICE_UUID = "00001523-1212-EFDE-1523-785FEABCD123"
+private const val CHAR_FOR_WRITE_UUID = "00001524-1212-EFDE-1523-785FEABCD123"
 
 class MainActivity : AppCompatActivity() {
     private val switchAdvertising: SwitchMaterial
@@ -41,27 +40,203 @@ class MainActivity : AppCompatActivity() {
         get() = findViewById<ScrollView>(R.id.scrollViewLog)
     private val textViewConnectionState: TextView
         get() = findViewById<TextView>(R.id.textViewConnectionState)
-    private val textViewCharForWrite: TextView
-        get() = findViewById<TextView>(R.id.textViewCharForWrite)
-    private val editTextCharForRead: EditText
-        get() = findViewById<EditText>(R.id.editTextCharForRead)
-    private val editTextCharForIndicate: EditText
-        get() = findViewById<EditText>(R.id.editTextCharForIndicate)
-    private val textViewSubscribers: TextView
-        get() = findViewById<TextView>(R.id.textViewSubscribers)
+    private val editTextWriteValue: TextView
+        get() = findViewById<EditText>(R.id.editTextWriteValue)
+    private val rv: RecyclerView
+        get() = findViewById<RecyclerView>(R.id.rv)
 
     private var isAdvertising = false
         set(value) {
             field = value
-
-            // update visual state of the switch
             runOnUiThread {
-                Handler().postDelayed( {
+                Handler().postDelayed({
                     if (value != switchAdvertising.isChecked)
                         switchAdvertising.isChecked = value
                 }, 200)
             }
         }
+
+    private val userWantsToScanAndConnect: Boolean get() = true
+    private var isScanning = false
+    private var lifecycleState = BLELifecycleState.Disconnected
+        set(value) {
+            field = value
+            appendLog("status = $value")
+        }
+
+    enum class BLELifecycleState {
+        Disconnected,
+        Scanning,
+        Connecting,
+        ConnectedDiscovering,
+        ConnectedSubscribing,
+        Connected
+    }
+
+    private var connectedGatt: BluetoothGatt? = null
+    private var characteristicForWrite: BluetoothGattCharacteristic? = null
+
+    //region BLE Scanning
+    private val bleScanner by lazy {
+        bluetoothAdapter.bluetoothLeScanner
+    }
+
+    private val scanFilter = ScanFilter.Builder()
+        .setServiceUuid(ParcelUuid(UUID.fromString(SERVICE_UUID)))
+        .build()
+
+    private val scanSettings: ScanSettings
+        get() {
+            return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                scanSettingsSinceM
+            } else {
+                scanSettingsBeforeM
+            }
+        }
+
+    private val scanSettingsBeforeM = ScanSettings.Builder()
+        .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+        .setReportDelay(0)
+        .build()
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private val scanSettingsSinceM = ScanSettings.Builder()
+        .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
+        .setCallbackType(ScanSettings.CALLBACK_TYPE_FIRST_MATCH)
+        .setMatchMode(ScanSettings.MATCH_MODE_AGGRESSIVE)
+        .setNumOfMatches(ScanSettings.MATCH_NUM_ONE_ADVERTISEMENT)
+        .setReportDelay(0)
+        .build()
+
+    private val gattCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            // TODO: timeout timer: if this callback not called - disconnect(), wait 120ms, close()
+            val deviceAddress = gatt.device.address
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    appendLog("Connected to $deviceAddress")
+
+                    // TODO: bonding state
+
+                    // recommended on UI thread https://punchthrough.com/android-ble-guide/
+                    Handler(Looper.getMainLooper()).post {
+                        lifecycleState = BLELifecycleState.ConnectedDiscovering
+                        gatt.discoverServices()
+                    }
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    appendLog("Disconnected from $deviceAddress")
+                    setConnectedGattToNull()
+                    gatt.close()
+                    lifecycleState = BLELifecycleState.Disconnected
+                    bleRestartLifecycle()
+                }
+            } else {
+                // TODO: random error 133 - close() and try reconnect
+
+                appendLog("ERROR: onConnectionStateChange status=$status deviceAddress=$deviceAddress, disconnecting")
+
+                setConnectedGattToNull()
+                gatt.close()
+                lifecycleState = BLELifecycleState.Disconnected
+                bleRestartLifecycle()
+            }
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            appendLog("onServicesDiscovered services.count=${gatt.services.size} status=$status")
+
+            if (status == 129 /*GATT_INTERNAL_ERROR*/) {
+                // it should be a rare case, this article recommends to disconnect:
+                // https://medium.com/@martijn.van.welie/making-android-ble-work-part-2-47a3cdaade07
+                appendLog("ERROR: status=129 (GATT_INTERNAL_ERROR), disconnecting")
+                gatt.disconnect()
+                return
+            }
+
+            val service = gatt.getService(UUID.fromString(SERVICE_UUID)) ?: run {
+                appendLog("ERROR: Service not found $SERVICE_UUID, disconnecting")
+                gatt.disconnect()
+                return
+            }
+
+            connectedGatt = gatt
+            characteristicForWrite = service.getCharacteristic(UUID.fromString(CHAR_FOR_WRITE_UUID))
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int
+        ) {
+            if (characteristic.uuid == UUID.fromString(CHAR_FOR_WRITE_UUID)) {
+                val log: String = "onCharacteristicWrite " + when (status) {
+                    BluetoothGatt.GATT_SUCCESS -> "OK"
+                    BluetoothGatt.GATT_WRITE_NOT_PERMITTED -> "not allowed"
+                    BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH -> "invalid length"
+                    else -> "error $status"
+                }
+                appendLog(log)
+            } else {
+                appendLog("onCharacteristicWrite unknown uuid $characteristic.uuid")
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {}
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {}
+    }
+
+
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val name: String? = result.scanRecord?.deviceName ?: result.device.name
+            appendLog("onScanResult name=$name address= ${result.device?.address}")
+            val isScannedBefore =
+                scannedDeviceList.firstOrNull { it.device.name == result.device.name }
+            if (isScannedBefore == null) scannedDeviceList.add(result)
+            scannedItemsAdapter.update(scannedDeviceList)
+        }
+
+        override fun onBatchScanResults(results: MutableList<ScanResult>?) {
+            appendLog("onBatchScanResults, ignoring")
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            appendLog("onScanFailed errorCode=$errorCode")
+            safeStopBleScan()
+            lifecycleState = BLELifecycleState.Disconnected
+            bleRestartLifecycle()
+        }
+    }
+
+    var scannedDeviceList = arrayListOf<ScanResult>()
+
+    val scannedItemsAdapter by lazy {
+        ScannedDevicesAdapter(scannedDeviceList, object : ScannedDevicesCallBack {
+            override fun connectToDevice(item: ScanResult) {
+                val name = item.scanRecord?.deviceName ?: item.device.name
+                Toast.makeText(this@MainActivity, name, Toast.LENGTH_SHORT).show()
+                lifecycleState = BLELifecycleState.Connecting
+                item.device.connectGatt(this@MainActivity, false, gattCallback)
+                safeStopBleScan()
+            }
+        })
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,6 +251,10 @@ class MainActivity : AppCompatActivity() {
                 bleStopAdvertising()
             }
         }
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        registerReceiver(bleOnOffListener, filter)
+        bleRestartLifecycle()
+        rv.adapter = scannedItemsAdapter
     }
 
     override fun onDestroy() {
@@ -83,13 +262,22 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
-    fun onTapSend(view: View) {
-        bleIndicate()
-    }
-
-    fun onTapClearLog(view: View) {
-        textViewLog.text = "Logs:"
-        appendLog("log cleared")
+    fun onTabSend(view: View) {
+        var gatt = connectedGatt ?: run {
+            appendLog("ERROR: write failed, no connected device")
+            return
+        }
+        var characteristic = characteristicForWrite ?: run {
+            appendLog("ERROR: write failed, characteristic unavailable $CHAR_FOR_WRITE_UUID")
+            return
+        }
+        if (!characteristic.isWriteable()) {
+            appendLog("ERROR: write failed, characteristic not writeable $CHAR_FOR_WRITE_UUID")
+            return
+        }
+        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        characteristic.value = editTextWriteValue.text.toString().toByteArray(Charsets.UTF_8)
+        gatt.writeCharacteristic(characteristic)
     }
 
     private fun appendLog(message: String) {
@@ -102,13 +290,6 @@ class MainActivity : AppCompatActivity() {
             Handler().postDelayed({
                 scrollViewLog.fullScroll(View.FOCUS_DOWN)
             }, 16)
-        }
-    }
-
-    private fun updateSubscribersUI() {
-        val strSubscribers = "${subscribedDevices.count()} subscribers"
-        runOnUiThread {
-            textViewSubscribers.text = strSubscribers
         }
     }
 
@@ -139,30 +320,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun bleStartGattServer() {
         val gattServer = bluetoothManager.openGattServer(this, gattServerCallback)
-        val service = BluetoothGattService(UUID.fromString(SERVICE_UUID), BluetoothGattService.SERVICE_TYPE_PRIMARY)
-        var charForRead = BluetoothGattCharacteristic(UUID.fromString(CHAR_FOR_READ_UUID),
-                BluetoothGattCharacteristic.PROPERTY_READ,
-                BluetoothGattCharacteristic.PERMISSION_READ)
-        var charForWrite = BluetoothGattCharacteristic(UUID.fromString(CHAR_FOR_WRITE_UUID),
-                BluetoothGattCharacteristic.PROPERTY_WRITE,
-                BluetoothGattCharacteristic.PERMISSION_WRITE)
-        var charForIndicate = BluetoothGattCharacteristic(UUID.fromString(CHAR_FOR_INDICATE_UUID),
-                BluetoothGattCharacteristic.PROPERTY_INDICATE,
-                BluetoothGattCharacteristic.PERMISSION_READ)
-        var charConfigDescriptor = BluetoothGattDescriptor(UUID.fromString(CCC_DESCRIPTOR_UUID),
-                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE)
-        charForIndicate.addDescriptor(charConfigDescriptor)
-
-        service.addCharacteristic(charForRead)
+        val service = BluetoothGattService(
+            UUID.fromString(SERVICE_UUID),
+            BluetoothGattService.SERVICE_TYPE_PRIMARY
+        )
+        var charForWrite = BluetoothGattCharacteristic(
+            UUID.fromString(CHAR_FOR_WRITE_UUID),
+            BluetoothGattCharacteristic.PROPERTY_WRITE,
+            BluetoothGattCharacteristic.PERMISSION_WRITE
+        )
         service.addCharacteristic(charForWrite)
-        service.addCharacteristic(charForIndicate)
-
         val result = gattServer.addService(service)
         this.gattServer = gattServer
-        appendLog("addService " + when(result) {
-            true -> "OK"
-            false -> "fail"
-        })
+        appendLog(
+            "addService " + when (result) {
+                true -> "OK"
+                false -> "fail"
+            }
+        )
     }
 
     private fun bleStopGattServer() {
@@ -171,18 +346,6 @@ class MainActivity : AppCompatActivity() {
         appendLog("gattServer closed")
         runOnUiThread {
             textViewConnectionState.text = getString(R.string.text_disconnected)
-        }
-    }
-
-    private fun bleIndicate() {
-        val text = editTextCharForIndicate.text.toString()
-        val data = text.toByteArray(Charsets.UTF_8)
-        charForIndicate?.let {
-            it.value = data
-            for (device in subscribedDevices) {
-                appendLog("sending indication \"$text\"")
-                gattServer?.notifyCharacteristicChanged(device, it, true)
-            }
         }
     }
 
@@ -200,15 +363,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val advertiseSettings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(true)
-            .build()
+        .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_BALANCED)
+        .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+        .setConnectable(true)
+        .build()
 
     private val advertiseData = AdvertiseData.Builder()
-            .setIncludeDeviceName(false) // don't include name, because if name size > 8 bytes, ADVERTISE_FAILED_DATA_TOO_LARGE
-            .addServiceUuid(ParcelUuid(UUID.fromString(SERVICE_UUID)))
-            .build()
+        .setIncludeDeviceName(false) // don't include name, because if name size > 8 bytes, ADVERTISE_FAILED_DATA_TOO_LARGE
+        .addServiceUuid(ParcelUuid(UUID.fromString(SERVICE_UUID)))
+        .build()
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
@@ -232,8 +395,6 @@ class MainActivity : AppCompatActivity() {
 
     //region BLE GATT server
     private var gattServer: BluetoothGattServer? = null
-    private val charForIndicate get() = gattServer?.getService(UUID.fromString(SERVICE_UUID))?.getCharacteristic(UUID.fromString(CHAR_FOR_INDICATE_UUID))
-    private val subscribedDevices = mutableSetOf<BluetoothDevice>()
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -244,8 +405,6 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     textViewConnectionState.text = getString(R.string.text_disconnected)
                     appendLog("Central did disconnect")
-                    subscribedDevices.remove(device)
-                    updateSubscribersUI()
                 }
             }
         }
@@ -254,34 +413,40 @@ class MainActivity : AppCompatActivity() {
             appendLog("onNotificationSent status=$status")
         }
 
-        override fun onCharacteristicReadRequest(device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic) {
-            var log: String = "onCharacteristicRead offset=$offset"
-            if (characteristic.uuid == UUID.fromString(CHAR_FOR_READ_UUID)) {
-                runOnUiThread {
-                    val strValue = editTextCharForRead.text.toString()
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, strValue.toByteArray(Charsets.UTF_8))
-                    log += "\nresponse=success, value=\"$strValue\""
-                    appendLog(log)
-                }
-            } else {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
-                log += "\nresponse=failure, unknown UUID\n${characteristic.uuid}"
-                appendLog(log)
-            }
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            characteristic: BluetoothGattCharacteristic
+        ) {
         }
 
-        override fun onCharacteristicWriteRequest(device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?) {
-            var log: String = "onCharacteristicWrite offset=$offset responseNeeded=$responseNeeded preparedWrite=$preparedWrite"
+        override fun onCharacteristicWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            characteristic: BluetoothGattCharacteristic,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray?
+        ) {
+            var log: String =
+                "onCharacteristicWrite offset=$offset responseNeeded=$responseNeeded preparedWrite=$preparedWrite"
             if (characteristic.uuid == UUID.fromString(CHAR_FOR_WRITE_UUID)) {
                 var strValue = value?.toString(Charsets.UTF_8) ?: ""
                 if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, strValue.toByteArray(Charsets.UTF_8))
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        strValue.toByteArray(Charsets.UTF_8)
+                    )
                     log += "\nresponse=success, value=\"$strValue\""
                 } else {
                     log += "\nresponse=notNeeded, value=\"$strValue\""
                 }
                 runOnUiThread {
-                    textViewCharForWrite.text = strValue
                 }
             } else {
                 if (responseNeeded) {
@@ -294,49 +459,26 @@ class MainActivity : AppCompatActivity() {
             appendLog(log)
         }
 
-        override fun onDescriptorReadRequest(device: BluetoothDevice, requestId: Int, offset: Int, descriptor: BluetoothGattDescriptor) {
+        override fun onDescriptorReadRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            offset: Int,
+            descriptor: BluetoothGattDescriptor
+        ) {
             var log = "onDescriptorReadRequest"
-            if (descriptor.uuid == UUID.fromString(CCC_DESCRIPTOR_UUID)) {
-                val returnValue = if (subscribedDevices.contains(device)) {
-                    log += " CCCD response=ENABLE_NOTIFICATION"
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                } else {
-                    log += " CCCD response=DISABLE_NOTIFICATION"
-                    BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                }
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, returnValue)
-            } else {
-                log += " unknown uuid=${descriptor.uuid}"
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
-            }
             appendLog(log)
         }
 
-        override fun onDescriptorWriteRequest(device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor, preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray) {
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice,
+            requestId: Int,
+            descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
+            value: ByteArray
+        ) {
             var strLog = "onDescriptorWriteRequest"
-            if (descriptor.uuid == UUID.fromString(CCC_DESCRIPTOR_UUID)) {
-                var status = BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
-                if (descriptor.characteristic.uuid == UUID.fromString(CHAR_FOR_INDICATE_UUID)) {
-                    if (Arrays.equals(value, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)) {
-                        subscribedDevices.add(device)
-                        status = BluetoothGatt.GATT_SUCCESS
-                        strLog += ", subscribed"
-                    } else if (Arrays.equals(value, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)) {
-                        subscribedDevices.remove(device)
-                        status = BluetoothGatt.GATT_SUCCESS
-                        strLog += ", unsubscribed"
-                    }
-                }
-                if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, status, 0, null)
-                }
-                updateSubscribersUI()
-            } else {
-                strLog += " unknown uuid=${descriptor.uuid}"
-                if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
-                }
-            }
             appendLog(strLog)
         }
     }
@@ -349,7 +491,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var activityResultHandlers = mutableMapOf<Int, (Int) -> Unit>()
-    private var permissionResultHandlers = mutableMapOf<Int, (Array<out String>, IntArray) -> Unit>()
+    private var permissionResultHandlers =
+        mutableMapOf<Int, (Array<out String>, IntArray) -> Unit>()
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -360,7 +503,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         permissionResultHandlers[requestCode]?.let { handler ->
             handler(permissions, grantResults)
@@ -387,6 +534,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun ensureCentralBluetoothCanBeUsed(completion: (Boolean, String) -> Unit){
+        grantBluetoothCentralPermissions(AskType.AskOnce) { isGranted ->
+            if (!isGranted) {
+                completion(false, "Bluetooth permissions denied")
+                return@grantBluetoothCentralPermissions
+            }
+
+            enableBluetooth(AskType.AskOnce) { isEnabled ->
+                if (!isEnabled) {
+                    completion(false, "Bluetooth OFF")
+                    return@enableBluetooth
+                }
+
+                grantLocationPermissionIfRequired(AskType.AskOnce) { isGranted ->
+                    if (!isGranted) {
+                        completion(false, "Location permission denied")
+                        return@grantLocationPermissionIfRequired
+                    }
+                    completion(true, "Bluetooth ON, permissions OK, ready")
+                }
+            }
+        }
+    }
+
     private fun enableBluetooth(askType: AskType, completion: (Boolean) -> Unit) {
         if (bluetoothAdapter.isEnabled) {
             completion(true)
@@ -395,7 +566,8 @@ class MainActivity : AppCompatActivity() {
             val requestCode = ENABLE_BLUETOOTH_REQUEST_CODE
 
             // set activity result handler
-            activityResultHandlers[requestCode] = { result -> Unit
+            activityResultHandlers[requestCode] = { result ->
+                Unit
                 val isSuccess = result == Activity.RESULT_OK
                 if (isSuccess || askType != AskType.InsistUntilSuccess) {
                     activityResultHandlers.remove(requestCode)
@@ -411,7 +583,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun grantBluetoothPeripheralPermissions(askType: AskType, completion: (Boolean) -> Unit) {
+    private fun grantBluetoothPeripheralPermissions(
+        askType: AskType,
+        completion: (Boolean) -> Unit
+    ) {
         val wantedPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             arrayOf(
                 Manifest.permission.BLUETOOTH_CONNECT,
@@ -451,5 +626,160 @@ class MainActivity : AppCompatActivity() {
     private fun Activity.requestPermissionArray(permissions: Array<String>, requestCode: Int) {
         ActivityCompat.requestPermissions(this, permissions, requestCode)
     }
+
+    private var bleOnOffListener = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.STATE_OFF)) {
+                BluetoothAdapter.STATE_ON -> {
+                    appendLog("onReceive: Bluetooth ON")
+                    if (lifecycleState == BLELifecycleState.Disconnected) {
+                        bleRestartLifecycle()
+                    }
+                }
+                BluetoothAdapter.STATE_OFF -> {
+                    appendLog("onReceive: Bluetooth OFF")
+                    bleEndLifecycle()
+                }
+            }
+        }
+    }
+
+    private fun bleRestartLifecycle() {
+        runOnUiThread {
+            if (userWantsToScanAndConnect) {
+                if (connectedGatt == null) {
+                    prepareAndStartBleScan()
+                } else {
+                    connectedGatt?.disconnect()
+                }
+            } else {
+                bleEndLifecycle()
+            }
+        }
+    }
+
+    private fun bleEndLifecycle() {
+        safeStopBleScan()
+        connectedGatt?.close()
+        setConnectedGattToNull()
+        lifecycleState = BLELifecycleState.Disconnected
+    }
+
+    private fun setConnectedGattToNull() {
+        connectedGatt = null
+        characteristicForWrite = null
+    }
+
+    private fun prepareAndStartBleScan() {
+        ensureCentralBluetoothCanBeUsed { isSuccess, message ->
+            appendLog(message)
+            if (isSuccess) {
+                safeStartBleScan()
+            }
+        }
+    }
+
+    private fun safeStartBleScan() {
+        if (isScanning) {
+            appendLog("Already scanning")
+            return
+        }
+
+        val serviceFilter = scanFilter.serviceUuid?.uuid.toString()
+        appendLog("Starting BLE scan, filter: $serviceFilter")
+
+        isScanning = true
+        lifecycleState = BLELifecycleState.Scanning
+        bleScanner.startScan(mutableListOf(scanFilter), scanSettings, scanCallback)//
+    }
+
+    private fun safeStopBleScan() {
+        if (!isScanning) {
+            appendLog("Already stopped")
+            return
+        }
+
+        appendLog("Stopping BLE scan")
+        isScanning = false
+        bleScanner.stopScan(scanCallback)
+    }
+
+    fun BluetoothGattCharacteristic.isWriteable(): Boolean =
+        containsProperty(BluetoothGattCharacteristic.PROPERTY_WRITE)
     //endregion
+
+    private fun BluetoothGattCharacteristic.containsProperty(property: Int): Boolean {
+        return (properties and property) != 0
+    }
+
+    private fun grantBluetoothCentralPermissions(askType: AskType, completion: (Boolean) -> Unit) {
+        val wantedPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_SCAN,
+            )
+        } else {
+            emptyArray()
+        }
+
+        if (wantedPermissions.isEmpty() || hasPermissions(wantedPermissions)) {
+            completion(true)
+        } else {
+            runOnUiThread {
+                val requestCode = BLUETOOTH_ALL_PERMISSIONS_REQUEST_CODE
+
+                // set permission result handler
+                permissionResultHandlers[requestCode] = { _ /*permissions*/, grantResults ->
+                    val isSuccess = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+                    if (isSuccess || askType != AskType.InsistUntilSuccess) {
+                        permissionResultHandlers.remove(requestCode)
+                        completion(isSuccess)
+                    } else {
+                        // request again
+                        requestPermissionArray(wantedPermissions, requestCode)
+                    }
+                }
+
+                requestPermissionArray(wantedPermissions, requestCode)
+            }
+        }
+    }
+
+    private fun grantLocationPermissionIfRequired(askType: AskType, completion: (Boolean) -> Unit) {
+        val wantedPermissions = arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // BLUETOOTH_SCAN permission has flag "neverForLocation", so location not needed
+            completion(true)
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || hasPermissions(wantedPermissions)) {
+            completion(true)
+        } else {
+            runOnUiThread {
+                val requestCode = LOCATION_PERMISSION_REQUEST_CODE
+
+                // prepare motivation message
+                val builder = AlertDialog.Builder(this)
+                builder.setTitle("Location permission required")
+                builder.setMessage("BLE advertising requires location access, starting from Android 6.0")
+                builder.setPositiveButton(android.R.string.ok) { _, _ ->
+                    requestPermissionArray(wantedPermissions, requestCode)
+                }
+                builder.setCancelable(false)
+
+                // set permission result handler
+                permissionResultHandlers[requestCode] = { permissions, grantResults ->
+                    val isSuccess = grantResults.firstOrNull() != PackageManager.PERMISSION_DENIED
+                    if (isSuccess || askType != AskType.InsistUntilSuccess) {
+                        permissionResultHandlers.remove(requestCode)
+                        completion(isSuccess)
+                    } else {
+                        // show motivation message again
+                        builder.create().show()
+                    }
+                }
+
+                // show motivation message
+                builder.create().show()
+            }
+        }
+    }
 }
