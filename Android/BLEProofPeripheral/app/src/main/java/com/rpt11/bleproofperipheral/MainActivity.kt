@@ -29,7 +29,8 @@ private const val ENABLE_BLUETOOTH_REQUEST_CODE = 1
 private const val BLUETOOTH_ALL_PERMISSIONS_REQUEST_CODE = 3
 private const val LOCATION_PERMISSION_REQUEST_CODE = 2
 private const val SERVICE_UUID = "00001523-1212-EFDE-1523-785FEABCD123"
-private const val CHAR_FOR_WRITE_UUID = "00001524-1212-EFDE-1523-785FEABCD123"
+//private const val CHAR_FOR_WRITE_UUID = "00001524-1212-EFDE-1523-785FEABCD123"
+private const val CHAR_FOR_READ_UUID = "00001524-1212-EFDE-1523-785FEABCD123"
 
 class MainActivity : AppCompatActivity() {
     private val switchAdvertising: SwitchMaterial
@@ -44,6 +45,8 @@ class MainActivity : AppCompatActivity() {
         get() = findViewById<EditText>(R.id.editTextWriteValue)
     private val rv: RecyclerView
         get() = findViewById<RecyclerView>(R.id.rv)
+
+    val telNo = "5544444422"
 
     private var isAdvertising = false
         set(value) {
@@ -74,7 +77,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private var connectedGatt: BluetoothGatt? = null
-    private var characteristicForWrite: BluetoothGattCharacteristic? = null
+    //private var characteristicForWrite: BluetoothGattCharacteristic? = null
+    private var characteristicForRead: BluetoothGattCharacteristic? = null
 
     //region BLE Scanning
     private val bleScanner by lazy {
@@ -160,7 +164,23 @@ class MainActivity : AppCompatActivity() {
             }
 
             connectedGatt = gatt
-            characteristicForWrite = service.getCharacteristic(UUID.fromString(CHAR_FOR_WRITE_UUID))
+            //characteristicForWrite = service.getCharacteristic(UUID.fromString(CHAR_FOR_WRITE_UUID))
+            characteristicForRead = service.getCharacteristic(UUID.fromString(CHAR_FOR_READ_UUID))
+            var gatt = connectedGatt ?: run {
+                appendLog("ERROR: write failed, no connected device")
+                return
+            }
+            var characteristic = characteristicForRead ?: run {
+                appendLog("ERROR: write failed, characteristic unavailable $CHAR_FOR_READ_UUID")
+                return
+            }
+            if (!characteristic.isReadable()) {
+                appendLog("ERROR: write failed, characteristic not writeable $CHAR_FOR_READ_UUID")
+                return
+            }
+            //characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            //characteristic.value = editTextWriteValue.text.toString().toByteArray(Charsets.UTF_8)
+            gatt.readCharacteristic(characteristic)
         }
 
         override fun onCharacteristicRead(
@@ -168,6 +188,18 @@ class MainActivity : AppCompatActivity() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
+            if (characteristic.uuid == UUID.fromString(CHAR_FOR_READ_UUID)) {
+                val strValue = characteristic.value.toString(Charsets.UTF_8)
+                val log = "onCharacterisRead" + when (status) {
+                    BluetoothGatt.GATT_SUCCESS -> "Ok value = \"$strValue\""
+                    BluetoothGatt.GATT_READ_NOT_PERMITTED -> "not allowed"
+                    else -> "error $status"
+                }
+                appendLog(log)
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, strValue, Toast.LENGTH_SHORT).show()
+                }
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -175,7 +207,7 @@ class MainActivity : AppCompatActivity() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            if (characteristic.uuid == UUID.fromString(CHAR_FOR_WRITE_UUID)) {
+            /*if (characteristic.uuid == UUID.fromString(CHAR_FOR_WRITE_UUID)) {
                 val log: String = "onCharacteristicWrite " + when (status) {
                     BluetoothGatt.GATT_SUCCESS -> "OK"
                     BluetoothGatt.GATT_WRITE_NOT_PERMITTED -> "not allowed"
@@ -185,19 +217,21 @@ class MainActivity : AppCompatActivity() {
                 appendLog(log)
             } else {
                 appendLog("onCharacteristicWrite unknown uuid $characteristic.uuid")
-            }
+            }*/
         }
 
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
-        ) {}
+        ) {
+        }
 
         override fun onDescriptorWrite(
             gatt: BluetoothGatt,
             descriptor: BluetoothGattDescriptor,
             status: Int
-        ) {}
+        ) {
+        }
     }
 
 
@@ -232,7 +266,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, name, Toast.LENGTH_SHORT).show()
                 lifecycleState = BLELifecycleState.Connecting
                 item.device.connectGatt(this@MainActivity, false, gattCallback)
-                safeStopBleScan()
             }
         })
     }
@@ -255,6 +288,7 @@ class MainActivity : AppCompatActivity() {
         registerReceiver(bleOnOffListener, filter)
         bleRestartLifecycle()
         rv.adapter = scannedItemsAdapter
+        editTextWriteValue.text = telNo
     }
 
     override fun onDestroy() {
@@ -267,17 +301,17 @@ class MainActivity : AppCompatActivity() {
             appendLog("ERROR: write failed, no connected device")
             return
         }
-        var characteristic = characteristicForWrite ?: run {
-            appendLog("ERROR: write failed, characteristic unavailable $CHAR_FOR_WRITE_UUID")
+        var characteristic = characteristicForRead ?: run {
+            appendLog("ERROR: write failed, characteristic unavailable $CHAR_FOR_READ_UUID")
             return
         }
-        if (!characteristic.isWriteable()) {
-            appendLog("ERROR: write failed, characteristic not writeable $CHAR_FOR_WRITE_UUID")
+        if (!characteristic.isReadable()) {
+            appendLog("ERROR: write failed, characteristic not writeable $CHAR_FOR_READ_UUID")
             return
         }
-        characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        characteristic.value = editTextWriteValue.text.toString().toByteArray(Charsets.UTF_8)
-        gatt.writeCharacteristic(characteristic)
+        //characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        //characteristic.value = editTextWriteValue.text.toString().toByteArray(Charsets.UTF_8)
+        gatt.readCharacteristic(characteristic)
     }
 
     private fun appendLog(message: String) {
@@ -309,6 +343,7 @@ class MainActivity : AppCompatActivity() {
     private fun bleStartAdvertising() {
         isAdvertising = true
         bleStartGattServer()
+        bluetoothAdapter.setName("Ömer")
         bleAdvertiser.startAdvertising(advertiseSettings, advertiseData, advertiseCallback)
     }
 
@@ -324,12 +359,18 @@ class MainActivity : AppCompatActivity() {
             UUID.fromString(SERVICE_UUID),
             BluetoothGattService.SERVICE_TYPE_PRIMARY
         )
-        var charForWrite = BluetoothGattCharacteristic(
+        /*var charForWrite = BluetoothGattCharacteristic(
             UUID.fromString(CHAR_FOR_WRITE_UUID),
             BluetoothGattCharacteristic.PROPERTY_WRITE,
             BluetoothGattCharacteristic.PERMISSION_WRITE
+        )*/
+        var charForRead = BluetoothGattCharacteristic(
+            UUID.fromString(CHAR_FOR_READ_UUID),
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
         )
-        service.addCharacteristic(charForWrite)
+        //service.addCharacteristic(charForWrite)
+        service.addCharacteristic(charForRead)
         val result = gattServer.addService(service)
         this.gattServer = gattServer
         appendLog(
@@ -369,7 +410,7 @@ class MainActivity : AppCompatActivity() {
         .build()
 
     private val advertiseData = AdvertiseData.Builder()
-        .setIncludeDeviceName(false) // don't include name, because if name size > 8 bytes, ADVERTISE_FAILED_DATA_TOO_LARGE
+        .setIncludeDeviceName(true) // don't include name, because if name size > 8 bytes, ADVERTISE_FAILED_DATA_TOO_LARGE
         .addServiceUuid(ParcelUuid(UUID.fromString(SERVICE_UUID)))
         .build()
 
@@ -410,7 +451,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            appendLog("onNotificationSent status=$status")
         }
 
         override fun onCharacteristicReadRequest(
@@ -419,6 +459,29 @@ class MainActivity : AppCompatActivity() {
             offset: Int,
             characteristic: BluetoothGattCharacteristic
         ) {
+            var log: String = "onCharacteristicRead offset=$offset"
+            if (characteristic.uuid == UUID.fromString(CHAR_FOR_READ_UUID)) {
+                runOnUiThread {
+                    val strValue = telNo
+                    gattServer?.sendResponse(
+                        device,
+                        requestId,
+                        BluetoothGatt.GATT_SUCCESS,
+                        0,
+                        strValue.toByteArray(Charsets.UTF_8)
+                    )
+                    log += "\nresponse=success, value=\"$strValue\""
+                    appendLog(log)
+                    runOnUiThread {
+                        Toast.makeText(this@MainActivity, strValue, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+                log += "\nresponse=failure, unknown UUID\n${characteristic.uuid}"
+                appendLog(log)
+            }
+
         }
 
         override fun onCharacteristicWriteRequest(
@@ -430,7 +493,7 @@ class MainActivity : AppCompatActivity() {
             offset: Int,
             value: ByteArray?
         ) {
-            var log: String =
+           /* var log: String =
                 "onCharacteristicWrite offset=$offset responseNeeded=$responseNeeded preparedWrite=$preparedWrite"
             if (characteristic.uuid == UUID.fromString(CHAR_FOR_WRITE_UUID)) {
                 var strValue = value?.toString(Charsets.UTF_8) ?: ""
@@ -456,7 +519,7 @@ class MainActivity : AppCompatActivity() {
                     log += "\nresponse=notNeeded, unknown UUID\n${characteristic.uuid}"
                 }
             }
-            appendLog(log)
+            appendLog(log)*/
         }
 
         override fun onDescriptorReadRequest(
@@ -465,8 +528,6 @@ class MainActivity : AppCompatActivity() {
             offset: Int,
             descriptor: BluetoothGattDescriptor
         ) {
-            var log = "onDescriptorReadRequest"
-            appendLog(log)
         }
 
         override fun onDescriptorWriteRequest(
@@ -478,8 +539,6 @@ class MainActivity : AppCompatActivity() {
             offset: Int,
             value: ByteArray
         ) {
-            var strLog = "onDescriptorWriteRequest"
-            appendLog(strLog)
         }
     }
     //endregion
@@ -534,7 +593,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun ensureCentralBluetoothCanBeUsed(completion: (Boolean, String) -> Unit){
+    private fun ensureCentralBluetoothCanBeUsed(completion: (Boolean, String) -> Unit) {
         grantBluetoothCentralPermissions(AskType.AskOnce) { isGranted ->
             if (!isGranted) {
                 completion(false, "Bluetooth permissions denied")
@@ -667,7 +726,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setConnectedGattToNull() {
         connectedGatt = null
-        characteristicForWrite = null
+        //characteristicForWrite = null
+        characteristicForRead = null
+
     }
 
     private fun prepareAndStartBleScan() {
@@ -703,6 +764,9 @@ class MainActivity : AppCompatActivity() {
         isScanning = false
         bleScanner.stopScan(scanCallback)
     }
+
+    fun BluetoothGattCharacteristic.isReadable(): Boolean =
+        containsProperty(BluetoothGattCharacteristic.PROPERTY_READ)
 
     fun BluetoothGattCharacteristic.isWriteable(): Boolean =
         containsProperty(BluetoothGattCharacteristic.PROPERTY_WRITE)
